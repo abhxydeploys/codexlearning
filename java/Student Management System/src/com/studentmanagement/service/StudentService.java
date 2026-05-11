@@ -37,6 +37,13 @@ public class StudentService {
          return sb.toString().trim();
     }
 
+    public ArrayList<Student> getAllStudent(){
+        if(students.isEmpty()){
+            return new ArrayList<>();
+        }
+        return ArrayList<Student>(students);
+    }
+
     public boolean updateStudent(Student studentToUpdate){
         for(int i = 0; i<students.size(); i++){
             if(students.get(i).getId() == studentToUpdate.getId()){

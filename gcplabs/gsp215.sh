@@ -2,31 +2,30 @@
 set -euo pipefail
 
 # ============================================================
-# GSP215
-# Global External Application Load Balancer + Cloud Armor
+# GSP215 - Set Up and Configure a Global External Application
+# Load Balancer with Cloud Armor
 # ============================================================
 
 EU_REGION="europe-west4"
 US_REGION="us-east1"
-
-EU_ZONES="europe-west4-a,europe-west4-b"
-US_ZONES="us-east1-b,us-east1-c"
-
+SIEGE_REGION="us-west1"
 SIEGE_ZONE="us-west1-a"
+
+EU_SUBNET="regions/europe-west4/subnetworks/default"
+US_SUBNET="regions/us-east1/subnetworks/default"
 
 STARTUP_URL="gs://spls/gsp215/gcpnet/httplb/startup.sh"
 
 echo "=================================================="
-echo "GSP215 START"
+echo "GSP215"
 echo "Project: $(gcloud config get-value project)"
 echo "=================================================="
 
 # ============================================================
-# TASK 1
-# FIREWALL
+# TASK 1 - FIREWALL RULES
 # ============================================================
 
-echo "[1/5] Creating firewall rules..."
+echo "[1/5] Firewall rules"
 
 gcloud compute firewall-rules create default-allow-http \
   --network=default \
@@ -43,16 +42,15 @@ gcloud compute firewall-rules create default-allow-health-check \
   --quiet
 
 # ============================================================
-# TASK 2
-# INSTANCE TEMPLATES
+# TASK 2 - INSTANCE TEMPLATES
 # ============================================================
 
-echo "[2/5] Creating instance templates..."
+echo "[2/5] Instance templates"
 
 gcloud compute instance-templates create europe-west4-template \
   --machine-type=e2-micro \
   --network=default \
-  --subnet=default \
+  --subnet="$EU_SUBNET" \
   --tags=http-server \
   --metadata=startup-script-url="$STARTUP_URL" \
   --quiet
@@ -60,23 +58,28 @@ gcloud compute instance-templates create europe-west4-template \
 gcloud compute instance-templates create us-east1-template \
   --machine-type=e2-micro \
   --network=default \
-  --subnet=default \
+  --subnet="$US_SUBNET" \
   --tags=http-server \
   --metadata=startup-script-url="$STARTUP_URL" \
   --quiet
 
 # ============================================================
-# EUROPE MIG
+# EUROPE REGIONAL MIG
 # ============================================================
 
-echo "Creating europe-west4-mig..."
+echo "Creating europe-west4-mig"
 
 gcloud compute instance-groups managed create europe-west4-mig \
   --region="$EU_REGION" \
-  --zones="$EU_ZONES" \
+  --zones=europe-west4-a,europe-west4-b \
   --template=europe-west4-template \
   --size=1 \
   --base-instance-name=europe-west4-mig \
+  --quiet
+
+gcloud compute instance-groups managed set-named-ports europe-west4-mig \
+  --region="$EU_REGION" \
+  --named-ports=http:80 \
   --quiet
 
 gcloud compute instance-groups managed set-autoscaling europe-west4-mig \
@@ -87,23 +90,23 @@ gcloud compute instance-groups managed set-autoscaling europe-west4-mig \
   --cool-down-period=45 \
   --quiet
 
-gcloud compute instance-groups managed set-named-ports europe-west4-mig \
-  --region="$EU_REGION" \
-  --named-ports=http:80 \
-  --quiet
-
 # ============================================================
-# US MIG
+# US REGIONAL MIG
 # ============================================================
 
-echo "Creating us-east1-mig..."
+echo "Creating us-east1-mig"
 
 gcloud compute instance-groups managed create us-east1-mig \
   --region="$US_REGION" \
-  --zones="$US_ZONES" \
+  --zones=us-east1-b,us-east1-c \
   --template=us-east1-template \
   --size=1 \
   --base-instance-name=us-east1-mig \
+  --quiet
+
+gcloud compute instance-groups managed set-named-ports us-east1-mig \
+  --region="$US_REGION" \
+  --named-ports=http:80 \
   --quiet
 
 gcloud compute instance-groups managed set-autoscaling us-east1-mig \
@@ -114,20 +117,11 @@ gcloud compute instance-groups managed set-autoscaling us-east1-mig \
   --cool-down-period=45 \
   --quiet
 
-gcloud compute instance-groups managed set-named-ports us-east1-mig \
-  --region="$US_REGION" \
-  --named-ports=http:80 \
-  --quiet
-
 # ============================================================
-# TASK 3
-# HEALTH CHECK
-#
-# IMPORTANT:
-# The lab explicitly requires TCP:80.
+# TASK 3 - TCP HEALTH CHECK
 # ============================================================
 
-echo "[3/5] Creating TCP health check..."
+echo "[3/5] TCP health check"
 
 gcloud compute health-checks create tcp http-health-check \
   --port=80 \
@@ -138,10 +132,10 @@ gcloud compute health-checks create tcp http-health-check \
   --quiet
 
 # ============================================================
-# BACKEND SERVICE
+# GLOBAL BACKEND SERVICE
 # ============================================================
 
-echo "Creating backend service..."
+echo "Creating backend service"
 
 gcloud compute backend-services create http-backend \
   --global \
@@ -153,10 +147,7 @@ gcloud compute backend-services create http-backend \
   --logging-sample-rate=1.0 \
   --quiet
 
-# Europe:
-# RATE
-# 50 RPS
-# Capacity 100%
+# Europe - RATE / 50 RPS
 
 gcloud compute backend-services add-backend http-backend \
   --global \
@@ -167,10 +158,7 @@ gcloud compute backend-services add-backend http-backend \
   --capacity-scaler=1.0 \
   --quiet
 
-# US:
-# UTILIZATION
-# 80%
-# Capacity 100%
+# US - UTILIZATION / 80%
 
 gcloud compute backend-services add-backend http-backend \
   --global \
@@ -185,7 +173,7 @@ gcloud compute backend-services add-backend http-backend \
 # URL MAP
 # ============================================================
 
-echo "Creating URL map..."
+echo "Creating URL map"
 
 gcloud compute url-maps create http-lb \
   --default-service=http-backend \
@@ -195,23 +183,15 @@ gcloud compute url-maps create http-lb \
 # TARGET HTTP PROXY
 # ============================================================
 
-echo "Creating target HTTP proxy..."
-
 gcloud compute target-http-proxies create http-lb-http-proxy \
   --url-map=http-lb \
   --quiet
 
 # ============================================================
-# IPV4 FRONTEND
-#
-# Lab specifies:
-# IPv4
-# HTTP
-# Ephemeral
-# Port 80
+# IPV4 FORWARDING RULE
 # ============================================================
 
-echo "Creating IPv4 frontend..."
+echo "Creating IPv4 frontend"
 
 gcloud compute forwarding-rules create http-lb-ipv4 \
   --global \
@@ -222,16 +202,10 @@ gcloud compute forwarding-rules create http-lb-ipv4 \
   --quiet
 
 # ============================================================
-# IPV6 FRONTEND
-#
-# Lab specifies:
-# IPv6
-# HTTP
-# Ephemeral
-# Port 80
+# IPV6 FORWARDING RULE
 # ============================================================
 
-echo "Creating IPv6 frontend..."
+echo "Creating IPv6 frontend"
 
 gcloud compute forwarding-rules create http-lb-ipv6 \
   --global \
@@ -242,105 +216,77 @@ gcloud compute forwarding-rules create http-lb-ipv6 \
   --ip-version=IPV6 \
   --quiet
 
-# ============================================================
-# GET LOAD BALANCER IPS
-# ============================================================
+LB_IP=$(gcloud compute forwarding-rules describe http-lb-ipv4 \
+  --global \
+  --format="value(IPAddress)")
 
-LB_IP_V4="$(
-  gcloud compute forwarding-rules describe http-lb-ipv4 \
-    --global \
-    --format="value(IPAddress)"
-)"
-
-LB_IP_V6="$(
-  gcloud compute forwarding-rules describe http-lb-ipv6 \
-    --global \
-    --format="value(IPAddress)"
-)"
+LB_IP6=$(gcloud compute forwarding-rules describe http-lb-ipv6 \
+  --global \
+  --format="value(IPAddress)")
 
 echo
-echo "LB IPv4: $LB_IP_V4"
-echo "LB IPv6: $LB_IP_V6"
+echo "IPv4: $LB_IP"
+echo "IPv6: $LB_IP6"
 echo
 
 # ============================================================
-# WAIT FOR LB TO ACTUALLY BECOME REACHABLE
-#
-# No arbitrary 180-second sleep.
+# WAIT FOR BACKENDS TO BECOME HEALTHY
 # ============================================================
 
-echo "Waiting for load balancer..."
-
-LB_READY=0
+echo "Waiting for healthy backends..."
 
 for i in $(seq 1 60); do
 
-  HTTP_CODE="$(
-    curl \
-      --connect-timeout 5 \
-      --max-time 10 \
-      -s \
-      -o /dev/null \
-      -w "%{http_code}" \
-      "http://$LB_IP_V4" || true
+  HEALTH="$(
+    gcloud compute backend-services get-health http-backend \
+      --global \
+      --format="value(status.healthStatus[].healthState)" \
+      2>/dev/null || true
   )"
 
-  echo "Attempt $i/60 -> HTTP $HTTP_CODE"
-
-  if [[ "$HTTP_CODE" == "200" ]]; then
-    LB_READY=1
+  if echo "$HEALTH" | grep -q "HEALTHY"; then
+    echo "Backend is healthy."
     break
   fi
 
+  echo "Backend not healthy yet ($i/60)"
   sleep 5
 done
 
-if [[ "$LB_READY" -ne 1 ]]; then
-  echo "ERROR: Load balancer did not become ready."
-  echo "Checking backend health..."
-  gcloud compute backend-services get-health http-backend --global || true
-  exit 1
-fi
-
-echo "Load balancer is ready."
-
 # ============================================================
-# TASK 4
-# SIEGE VM
+# TASK 4 - SIEGE VM
 # ============================================================
 
-echo "[4/5] Creating siege-vm..."
+echo "[4/5] Creating siege-vm"
 
-cat >/tmp/siege-startup.sh <<EOF
+cat > /tmp/siege-startup.sh <<EOF
 #!/bin/bash
 
 set -e
 
 export DEBIAN_FRONTEND=noninteractive
 
-apt-get update
-apt-get -y install siege
+apt-get update -y
+apt-get install -y siege
 
-LB_IP="$LB_IP_V4"
+LB_IP="$LB_IP"
 
-# Wait until LB responds.
-until curl --connect-timeout 5 --max-time 10 -sf "http://\$LB_IP" >/dev/null; do
-    sleep 5
+echo "Waiting for load balancer..."
+
+until curl -sSf --connect-timeout 5 --max-time 10 \
+  "http://\$LB_IP" >/dev/null; do
+  sleep 5
 done
 
-echo "LB ready. Starting Siege."
-
-# Required lab test:
-# 150 concurrent users
-# 120 seconds
+echo "Starting Siege against \$LB_IP"
 
 nohup siege \
-    -c 150 \
-    -t120s \
-    "http://\$LB_IP" \
-    >/var/log/gsp215-siege.log 2>&1 < /dev/null &
+  -c 150 \
+  -t120s \
+  "http://\$LB_IP" \
+  > /var/log/gsp215-siege.log 2>&1 < /dev/null &
 
-echo \$! >/var/run/gsp215-siege.pid
+echo \$! > /var/run/gsp215-siege.pid
 EOF
 
 gcloud compute instances create siege-vm \
@@ -351,31 +297,27 @@ gcloud compute instances create siege-vm \
   --metadata-from-file=startup-script=/tmp/siege-startup.sh \
   --quiet
 
-SIEGE_IP="$(
+SIEGE_IP=$(
   gcloud compute instances describe siege-vm \
     --zone="$SIEGE_ZONE" \
     --format="value(networkInterfaces[0].accessConfigs[0].natIP)"
-)"
+)
 
 echo "Siege VM IP: $SIEGE_IP"
 
 # ============================================================
-# WAIT FOR THE REQUIRED 120 SECOND TEST
-#
-# The test itself is 120 seconds, so this wait is intentional.
-# It is NOT an arbitrary infrastructure wait.
+# WAIT FOR SIEGE TEST
 # ============================================================
 
-echo "Allowing the 120-second Siege test to complete..."
+echo "Waiting for Siege test to finish..."
 
-sleep 130
+sleep 140
 
 # ============================================================
-# TASK 5
-# CLOUD ARMOR
+# TASK 5 - CLOUD ARMOR
 # ============================================================
 
-echo "[5/5] Creating Cloud Armor policy..."
+echo "[5/5] Cloud Armor"
 
 gcloud compute security-policies create denylist-siege \
   --description="Deny siege-vm traffic" \
@@ -397,44 +339,34 @@ gcloud compute backend-services update http-backend \
 # VERIFY 403
 # ============================================================
 
-echo "Waiting for Cloud Armor propagation..."
-
-ARMOR_READY=0
+echo "Verifying Cloud Armor..."
 
 for i in $(seq 1 36); do
 
-  HTTP_CODE="$(
+  CODE=$(
     gcloud compute ssh siege-vm \
       --zone="$SIEGE_ZONE" \
       --quiet \
-      --command="curl -s -o /dev/null -w '%{http_code}' http://$LB_IP_V4" \
+      --command="curl -s -o /dev/null -w '%{http_code}' http://$LB_IP" \
       2>/dev/null || true
-  )"
+  )
 
-  echo "Cloud Armor check $i/36 -> HTTP $HTTP_CODE"
+  echo "Attempt $i/36 -> HTTP $CODE"
 
-  if [[ "$HTTP_CODE" == "403" ]]; then
-    ARMOR_READY=1
+  if [ "$CODE" = "403" ]; then
+    echo "Cloud Armor verified."
     break
   fi
 
   sleep 5
 done
 
-if [[ "$ARMOR_READY" -ne 1 ]]; then
-  echo "WARNING: Cloud Armor did not return 403 within the check window."
-  echo "The policy may still be propagating."
-else
-  echo "Cloud Armor verified: HTTP 403"
-fi
-
 echo
 echo "=================================================="
-echo "GSP215 SETUP COMPLETE"
+echo "GSP215 COMPLETE"
 echo "=================================================="
-echo "LB IPv4 : $LB_IP_V4"
-echo "LB IPv6 : $LB_IP_V6"
-echo "Siege IP: $SIEGE_IP"
-echo "Policy  : denylist-siege"
-echo "Backend : http-backend"
+echo "Load Balancer IPv4 : $LB_IP"
+echo "Load Balancer IPv6 : $LB_IP6"
+echo "Siege VM IP        : $SIEGE_IP"
+echo "Cloud Armor        : denylist-siege"
 echo "=================================================="
